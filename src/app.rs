@@ -12,7 +12,7 @@ use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 use tray_icon::menu::MenuEvent;
@@ -379,15 +379,26 @@ fn run_inner() -> anyhow::Result<()> {
 
     // Hotkey manager + registration must happen on the event-loop thread
     // (Windows). The manager is held by App for the program lifetime. The
-    // registration context (R3) names the combo and its most likely failure
-    // cause, since Ctrl+Shift+Space is often already held by another app.
+    // hotkey comes from config (HOTKEY, default Ctrl+Alt+Space) and is parsed by
+    // global-hotkey's accelerator syntax; both the parse error (R3) and the
+    // registration error (R4) name the combo and point the user at HOTKEY.
     let hotkey_manager =
         GlobalHotKeyManager::new().context("creating the global hotkey manager")?;
-    let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
-    hotkey_manager.register(hotkey).context(
-        "registering the global hotkey Ctrl+Shift+Space — it may already be in use by \
-         another application (for example a Windows IME layout switch or PowerToys)",
-    )?;
+    let hotkey: HotKey = raw.hotkey.parse().with_context(|| {
+        format!(
+            "parsing HOTKEY \"{}\" — expected a combination like \"Ctrl+Alt+Space\" \
+             (modifiers Ctrl/Alt/Shift/Super + a key such as Space or a letter, joined by +)",
+            raw.hotkey
+        )
+    })?;
+    hotkey_manager.register(hotkey).with_context(|| {
+        format!(
+            "registering the global hotkey \"{}\" — it may already be in use by another \
+             application (e.g. a Windows IME layout switch or PowerToys); set HOTKEY in your \
+             .env to a free combination",
+            raw.hotkey
+        )
+    })?;
     let hotkey_id = hotkey.id();
 
     // Audio thread: posts finalized capture back as a UserEvent (KTD12). The

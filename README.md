@@ -84,8 +84,19 @@ precedence (highest first):
 | `BACKEND` | `local` or `groq` — sets the default on launch. Defaults to `groq`. |
 | `GROQ_API_KEY` | Required when the active backend is `groq`. |
 | `WHISPER_MODEL_PATH` | Absolute path to a ggml model file, required for `local`. |
+| `HOTKEY` | Push-to-talk hotkey. Defaults to `Ctrl+Alt+Space`. |
 
 Copy [`.env.example`](.env.example) to `.env` and fill it in.
+
+**Hotkey syntax.** `HOTKEY` is modifiers + a key joined by `+` (case-insensitive):
+modifiers `Ctrl`/`Control`, `Alt`/`Option`, `Shift`, `Super`/`Cmd`/`Command`
+(`Win`/`Meta` are **not** accepted — use `Super`); keys are names like `Space`, or
+letters as `A`/`KeyA`. Examples: `Ctrl+Alt+Space`, `Ctrl+Alt+J`. **If the default
+is already in use** by another app (Windows IME layout-switch, PowerToys, …), the
+app exits at startup with a message saying so — set `HOTKEY` to a free
+combination. *AltGr caveat:* on keyboard layouts where Right-Alt is AltGr (many
+non-US layouts), AltGr synthesizes Ctrl+Alt, so prefer a combo without `Alt`
+(e.g. `Ctrl+Shift+J`) on those keyboards.
 
 > **Security:** `GROQ_API_KEY` is a billable credential. Do **not** place a
 > populated `.env` in a world-readable directory (a shared drive, or
