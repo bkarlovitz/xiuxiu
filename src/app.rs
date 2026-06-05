@@ -6,6 +6,8 @@
 //! [`UserEvent`] handled in [`App::user_event`]. The recording state machine
 //! ([`Machine`]) is pure and unit-tested independently of winit.
 
+use std::time::Duration;
+
 use anyhow::Context;
 use winit::application::ApplicationHandler;
 use winit::event::{StartCause, WindowEvent};
@@ -146,9 +148,12 @@ pub enum UserEvent {
     Menu(MenuEvent),
     Hotkey(GlobalHotKeyEvent),
     AudioCaptured(CapturedAudio),
+    /// Posted by the worker after it has transcribed AND (on success) injected
+    /// the text on its own thread (KTD5). `Ok(())` = done; `Err(msg)` = a
+    /// transcription or injection failure to surface as a transient notice.
     Transcribed {
         id: u64,
-        result: Result<String, String>,
+        result: Result<(), String>,
     },
 }
 
@@ -162,6 +167,9 @@ struct App {
     hotkey_id: u32,
     proxy: EventLoopProxy<UserEvent>,
     initial_active: Backend,
+    /// Per-character typing delay (ms) for injection throttling (config). The
+    /// `Duration` conversion happens at the dispatch call site.
+    typing_delay_ms: u64,
     /// Notices to show once the tray exists (startup mic error, fallback).
     pending_notices: Vec<(String, String)>,
 }
@@ -236,35 +244,39 @@ impl App {
     fn dispatch(&self, captured: CapturedAudio, id: u64) {
         let backend = self.backends.current();
         let proxy = self.proxy.clone();
+        let delay = Duration::from_millis(self.typing_delay_ms);
         std::thread::spawn(move || {
-            // Preprocess + transcribe off the UI thread (KTD12/KTD4).
+            // Preprocess + transcribe AND inject, all off the UI thread
+            // (KTD12/KTD4/KTD5) — the per-char typing throttle must never block
+            // the event loop. Post the outcome back for the state transition.
             let canonical =
                 audio::to_canonical(&captured.samples, captured.sample_rate, captured.channels);
-            let result = backend
-                .transcribe_blocking(&canonical)
-                .map_err(|e| e.to_string());
+            let result = match backend.transcribe_blocking(&canonical) {
+                Ok(text) => {
+                    // R16: log length, never content.
+                    tracing::info!("{}", logging::describe_transcript(&text));
+                    inject::inject(&text, delay).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
             let _ = proxy.send_event(UserEvent::Transcribed { id, result });
         });
     }
 
-    fn on_transcribed(&mut self, id: u64, result: Result<String, String>) {
+    fn on_transcribed(&mut self, id: u64, result: Result<(), String>) {
+        // Injection already happened on the worker thread (KTD5); here we only
+        // resolve the state and surface any failure.
         match self.machine.on_transcribed(id) {
-            ResultAction::Current => match result {
-                Ok(text) => {
-                    // R16: log length, never content.
-                    tracing::info!("{}", logging::describe_transcript(&text));
-                    if let Err(e) = inject::inject(&text) {
-                        tracing::error!("text injection failed: {e}");
-                    }
-                }
-                Err(message) => {
-                    // R12: failed call is non-fatal — log + transient notice, keep running.
-                    tracing::warn!("transcription failed: {message}");
+            ResultAction::Current => {
+                if let Err(message) = result {
+                    // R12: a failed transcription or injection is non-fatal —
+                    // log + transient notice, keep running.
+                    tracing::warn!("dictation failed: {message}");
                     if let Some(tray) = self.tray.as_ref() {
-                        tray.transient("transcription failed");
+                        tray.transient("dictation failed");
                     }
                 }
-            },
+            }
             ResultAction::Stale => {
                 tracing::info!("dropped stale transcription result (id {id})");
             }
@@ -336,6 +348,11 @@ impl ApplicationHandler<UserEvent> for App {
 pub fn run() -> anyhow::Result<()> {
     let _log_guard = logging::init();
     logging::install_panic_hook();
+    // Redirect whisper.cpp/GGML's internal log stream away from stderr before any
+    // WhisperContext is created (KTD3). Global + idempotent; with whisper-rs's
+    // default features the captured lines are dropped (silent) rather than
+    // flooding the console — the FullParams print flags don't cover this stream.
+    whisper_rs::install_logging_hooks();
     tracing::info!("xiuxiu starting");
 
     let result = run_inner();
@@ -419,6 +436,7 @@ fn run_inner() -> anyhow::Result<()> {
     }
 
     let initial_active = backends.active_kind();
+    let typing_delay_ms = raw.typing_delay_ms;
     let mut app = App {
         machine: Machine::new(),
         tray: None,
@@ -428,6 +446,7 @@ fn run_inner() -> anyhow::Result<()> {
         hotkey_id,
         proxy,
         initial_active,
+        typing_delay_ms,
         pending_notices,
     };
 

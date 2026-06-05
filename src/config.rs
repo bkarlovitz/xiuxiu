@@ -21,6 +21,7 @@ const KEY_BACKEND: &str = "BACKEND";
 const KEY_GROQ: &str = "GROQ_API_KEY";
 const KEY_MODEL: &str = "WHISPER_MODEL_PATH";
 const KEY_HOTKEY: &str = "HOTKEY";
+const KEY_TYPING_DELAY_MS: &str = "TYPING_DELAY_MS";
 
 /// Default backend when `BACKEND` is unset. Groq is the lighter default (no
 /// multi-hundred-MB model needed); validation/fallback guides the user if no
@@ -33,6 +34,10 @@ const DEFAULT_BACKEND: Backend = Backend::Groq;
 /// where Right-Alt is AltGr, AltGr synthesizes Ctrl+Alt — those users should
 /// override `HOTKEY`.)
 const DEFAULT_HOTKEY: &str = "Ctrl+Alt+Space";
+
+/// Default per-character typing delay (ms) when `TYPING_DELAY_MS` is unset.
+/// Throttles synthetic keystrokes so target apps don't drop characters.
+const DEFAULT_TYPING_DELAY_MS: u64 = 8;
 
 /// Which transcription backend is selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +112,9 @@ pub struct RawConfig {
     /// Global hotkey as an accelerator string (e.g. `Ctrl+Alt+Space`). Kept as a
     /// raw string here; parsed into a `HotKey` in `app.rs` (KTD1).
     pub hotkey: String,
+    /// Per-character typing delay in milliseconds (injection throttle). The
+    /// `Duration` conversion happens at the injection call site in `app.rs`.
+    pub typing_delay_ms: u64,
 }
 
 impl RawConfig {
@@ -159,6 +167,9 @@ pub fn resolve(
         groq_api_key: pick(KEY_GROQ).map(Secret::new),
         whisper_model_path: pick(KEY_MODEL).map(PathBuf::from),
         hotkey: pick(KEY_HOTKEY).unwrap_or_else(|| DEFAULT_HOTKEY.to_string()),
+        typing_delay_ms: pick(KEY_TYPING_DELAY_MS)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_TYPING_DELAY_MS),
     })
 }
 
@@ -178,10 +189,16 @@ pub fn load_env_file(path: &Path) -> HashMap<String, String> {
 /// the keys it lists, so every config key must appear here or it is invisible
 /// as a real environment variable (it would only work via a `.env` file).
 fn env_map() -> HashMap<String, String> {
-    [KEY_BACKEND, KEY_GROQ, KEY_MODEL, KEY_HOTKEY]
-        .iter()
-        .filter_map(|key| std::env::var(key).ok().map(|v| (key.to_string(), v)))
-        .collect()
+    [
+        KEY_BACKEND,
+        KEY_GROQ,
+        KEY_MODEL,
+        KEY_HOTKEY,
+        KEY_TYPING_DELAY_MS,
+    ]
+    .iter()
+    .filter_map(|key| std::env::var(key).ok().map(|v| (key.to_string(), v)))
+    .collect()
 }
 
 /// Resolve config from the live environment + `.env` files at the two
@@ -350,5 +367,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.hotkey, "Ctrl+Alt+Space");
+    }
+
+    #[test]
+    fn unset_typing_delay_uses_default() {
+        let cfg = resolve(&empty(), &empty(), &map(&[("GROQ_API_KEY", "k")])).unwrap();
+        assert_eq!(cfg.typing_delay_ms, 8);
+    }
+
+    #[test]
+    fn typing_delay_override_is_read() {
+        let cfg = resolve(
+            &empty(),
+            &empty(),
+            &map(&[("GROQ_API_KEY", "k"), ("TYPING_DELAY_MS", "20")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.typing_delay_ms, 20);
+    }
+
+    #[test]
+    fn typing_delay_precedence_env_over_exedir() {
+        let env = map(&[("TYPING_DELAY_MS", "5")]);
+        let exedir = map(&[("GROQ_API_KEY", "k"), ("TYPING_DELAY_MS", "50")]);
+        assert_eq!(resolve(&env, &empty(), &exedir).unwrap().typing_delay_ms, 5);
+        assert_eq!(
+            resolve(&empty(), &empty(), &exedir)
+                .unwrap()
+                .typing_delay_ms,
+            50
+        );
+    }
+
+    #[test]
+    fn non_numeric_typing_delay_falls_back_to_default() {
+        let cfg = resolve(
+            &map(&[("TYPING_DELAY_MS", "fast")]),
+            &empty(),
+            &map(&[("GROQ_API_KEY", "k")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.typing_delay_ms, 8);
     }
 }

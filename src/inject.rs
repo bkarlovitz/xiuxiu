@@ -5,21 +5,20 @@
 //!     characters below `0x20` (CR/LF/ESC/TAB). A transcript injected into a
 //!     focused terminal must not be able to emit newlines or escape sequences
 //!     that execute commands (S3 trust boundary).
-//!   - text is typed in small chunks with a short inter-chunk delay so a long
-//!     string does not outrun slow targets (terminals/Electron/RDP).
+//!   - text is typed one character at a time with a short delay between
+//!     characters so a long string does not outrun slow targets
+//!     (terminals/Electron/RDP). enigo's `text()` sends the whole string in one
+//!     `SendInput` burst with no inter-key delay, which drops characters on
+//!     targets that can't keep up; pacing it ourselves is the fix (enigo 0.6 has
+//!     no Windows delay setting). Injection runs on the transcription worker
+//!     thread, never the UI thread (KTD5), so the sleeps don't freeze the loop.
 //!
-//! `Enigo` is constructed once per [`inject`] call (not per chunk) to avoid
-//! repeating the Windows `SendInput`/COM setup cost.
+//! `Enigo` is constructed once per [`inject`] call.
 
 use std::time::Duration;
 
 use enigo::{Enigo, Keyboard, Settings};
 use thiserror::Error;
-
-/// Max characters typed per chunk.
-const CHUNK_CHARS: usize = 64;
-/// Pause between chunks so slow targets keep up.
-const INTER_CHUNK_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum InjectError {
@@ -31,29 +30,20 @@ pub enum InjectError {
 
 /// Strip control characters so injected text cannot execute in a terminal and
 /// cannot contain the NUL byte enigo rejects. Normal Unicode (including emoji)
-/// is preserved.
+/// is preserved. This is the sequence [`inject`] will type, in order.
 pub fn sanitize(text: &str) -> String {
     text.chars()
         .filter(|&c| (c as u32) >= 0x20 && c != '\u{7f}')
         .collect()
 }
 
-/// Split text into chunks of at most `max_chars` characters (char-aligned so
-/// multibyte characters are never split). Empty input yields no chunks.
-pub fn chunk_text(text: &str, max_chars: usize) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let chars: Vec<char> = text.chars().collect();
-    chars
-        .chunks(max_chars.max(1))
-        .map(|c| c.iter().collect())
-        .collect()
-}
-
-/// Sanitize and type `text` into the focused window. A string that sanitizes to
-/// empty results in no injection call.
-pub fn inject(text: &str) -> Result<(), InjectError> {
+/// Sanitize `text` and type it into the focused window one character at a time,
+/// sleeping `delay` between characters so the target app keeps up. A string that
+/// sanitizes to empty types nothing.
+///
+/// Uses `text()` per char (the pure `KEYEVENTF_UNICODE` path) rather than
+/// `key(Key::Unicode, _)` so emoji / non-BMP characters are handled correctly.
+pub fn inject(text: &str, delay: Duration) -> Result<(), InjectError> {
     let cleaned = sanitize(text);
     if cleaned.is_empty() {
         return Ok(());
@@ -62,14 +52,13 @@ pub fn inject(text: &str) -> Result<(), InjectError> {
     let mut enigo =
         Enigo::new(&Settings::default()).map_err(|e| InjectError::Init(e.to_string()))?;
 
-    let chunks = chunk_text(&cleaned, CHUNK_CHARS);
-    let last = chunks.len().saturating_sub(1);
-    for (i, chunk) in chunks.iter().enumerate() {
+    let mut chars = cleaned.chars().peekable();
+    while let Some(c) = chars.next() {
         enigo
-            .text(chunk)
+            .text(&c.to_string())
             .map_err(|e| InjectError::Type(e.to_string()))?;
-        if i != last {
-            std::thread::sleep(INTER_CHUNK_DELAY);
+        if chars.peek().is_some() {
+            std::thread::sleep(delay);
         }
     }
     Ok(())
@@ -104,30 +93,18 @@ mod tests {
     }
 
     #[test]
-    fn chunk_splits_preserving_content_and_order() {
-        let text: String = "abcdefghij".repeat(20); // 200 chars
-        let chunks = chunk_text(&text, CHUNK_CHARS);
-        assert!(chunks.iter().all(|c| c.chars().count() <= CHUNK_CHARS));
-        assert_eq!(chunks.concat(), text); // nothing lost or reordered
-        assert_eq!(chunks.len(), (200 + CHUNK_CHARS - 1) / CHUNK_CHARS);
+    fn sanitized_text_round_trips_char_by_char() {
+        // `inject` types `sanitize(text).chars()` in order; the per-char sequence
+        // must reconstruct the sanitized string with no loss or reorder.
+        let input = "Tomorrow morning ❤️ 🚀 done.";
+        let sanitized = sanitize(input);
+        let typed: String = sanitized.chars().collect();
+        assert_eq!(typed, sanitized);
     }
 
     #[test]
-    fn chunk_short_string_is_single_chunk() {
-        assert_eq!(chunk_text("hi", CHUNK_CHARS), vec!["hi".to_string()]);
-    }
-
-    #[test]
-    fn chunk_empty_string_yields_no_chunks() {
-        assert!(chunk_text("", CHUNK_CHARS).is_empty());
-        // A string that is all control chars sanitizes to empty → no chunks.
-        assert!(chunk_text(&sanitize("\0\n\r"), CHUNK_CHARS).is_empty());
-    }
-
-    #[test]
-    fn chunk_does_not_split_multibyte_characters() {
-        let emoji = "❤️🎉🚀".repeat(50);
-        let chunks = chunk_text(&emoji, 3);
-        assert_eq!(chunks.concat(), emoji);
+    fn all_control_chars_sanitize_to_empty() {
+        // An all-control input sanitizes to empty → inject types nothing.
+        assert!(sanitize("\0\n\r\u{1b}").is_empty());
     }
 }

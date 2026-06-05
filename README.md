@@ -85,8 +85,14 @@ precedence (highest first):
 | `GROQ_API_KEY` | Required when the active backend is `groq`. |
 | `WHISPER_MODEL_PATH` | Absolute path to a ggml model file, required for `local`. |
 | `HOTKEY` | Push-to-talk hotkey. Defaults to `Ctrl+Alt+Space`. |
+| `TYPING_DELAY_MS` | Per-character typing delay in ms. Defaults to `8`. |
 
 Copy [`.env.example`](.env.example) to `.env` and fill it in.
+
+**Typing speed.** Transcribed text is typed one character at a time with a small
+delay (`TYPING_DELAY_MS`, default 8 ms) so the focused app doesn't drop
+characters. If a target app still drops characters, raise it (e.g. 15–25); lower
+it for faster typing if your apps keep up.
 
 **Hotkey syntax.** `HOTKEY` is modifiers + a key joined by `+` (case-insensitive):
 modifiers `Ctrl`/`Control`, `Alt`/`Option`, `Shift`, `Super`/`Cmd`/`Command`
