@@ -189,7 +189,7 @@ fn start_capture() -> Result<(cpal::Stream, Arc<Mutex<SessionBuffer>>, u32, u16)
         .default_input_config()
         .map_err(|e| AudioError::Config(e.to_string()))?;
 
-    let rate = supported.sample_rate().0;
+    let rate = supported.sample_rate();
     let channels = supported.channels();
     let buffer = Arc::new(Mutex::new(SessionBuffer::default()));
     {

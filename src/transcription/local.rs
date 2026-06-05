@@ -49,15 +49,21 @@ impl LocalWhisperBackend {
             .full(params, audio)
             .map_err(|e| TranscribeError::Local(e.to_string()))?;
 
-        let n = state
-            .full_n_segments()
-            .map_err(|e| TranscribeError::Local(e.to_string()))?;
+        // whisper-rs 0.16: full_n_segments() returns i32 (not Result); segments
+        // come via get_segment(i) -> Option<WhisperSegment>, text via
+        // to_str_lossy() -> Result<Cow<str>> (lossy tolerates non-UTF-8 model
+        // output). into_owned() yields the String the Vec needs and discharges
+        // the segment's borrow of `state`.
+        let n = state.full_n_segments();
         let mut segments = Vec::with_capacity(n as usize);
         for i in 0..n {
-            let seg = state
-                .full_get_segment_text(i)
-                .map_err(|e| TranscribeError::Local(e.to_string()))?;
-            segments.push(seg);
+            if let Some(segment) = state.get_segment(i) {
+                let text = segment
+                    .to_str_lossy()
+                    .map_err(|e| TranscribeError::Local(e.to_string()))?
+                    .into_owned();
+                segments.push(text);
+            }
         }
         Ok(concat_segments(&segments))
     }
