@@ -1,0 +1,2 @@
+# Allow free-form issues in addition to the templates above.
+blank_issues_enabled: true

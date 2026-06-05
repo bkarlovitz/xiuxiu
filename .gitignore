@@ -1,0 +1,28 @@
+# Rust build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Secrets & runtime artifacts — never commit
+.env
+*.env
+!.env.example
+xiuxiu.log
+*.log
+
+# Whisper model files are large and downloaded separately (see README)
+*.bin
+
+# Editors / IDEs
+/.vscode/
+/.idea/
+*.iml
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Note: Cargo.lock IS committed (this is an application, not a library).

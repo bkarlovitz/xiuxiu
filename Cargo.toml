@@ -1,0 +1,66 @@
+[package]
+name = "xiuxiu"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Push-to-talk voice dictation tray app for Windows (local whisper.cpp or Groq)"
+authors = ["Bryan Karlovitz <bryan@uwchlanventures.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/bkarlovitz/xiuxiu"
+homepage = "https://github.com/bkarlovitz/xiuxiu"
+keywords = ["dictation", "whisper", "speech-to-text", "tray", "windows"]
+categories = ["multimedia::audio", "command-line-utilities"]
+
+# Library target holds all logic so it is unit/integration testable; the binary
+# is a thin shell that sets the Windows subsystem and calls `run()`.
+[lib]
+name = "xiuxiu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "xiuxiu"
+path = "src/main.rs"
+
+[dependencies]
+# Audio capture from the default input device.
+cpal = "0.17"
+# Global hotkey registration + press/release events (MOD_NOREPEAT on Windows).
+global-hotkey = "0.8"
+# System tray icon + menu; integrates with the winit event loop.
+tray-icon = "0.24"
+# Event loop (ApplicationHandler) on the main thread; also drives the win32 pump.
+winit = "0.30"
+# In-memory WAV encoding for the Groq upload.
+hound = "3.5"
+# Band-limited resampling to 16 kHz for whisper.
+rubato = "0.16"
+# Synthetic keyboard input (Unicode) into the focused window.
+enigo = "0.6"
+# Local whisper.cpp inference (requires LLVM/libclang + CMake + MSVC at build time).
+whisper-rs = "0.16"
+# Groq multipart upload; rustls-tls avoids an OpenSSL/native-tls dependency on Windows.
+reqwest = { version = "0.13", default-features = false, features = ["multipart", "json", "rustls", "http2"] }
+# Current-thread runtime to drive reqwest from the worker thread (not #[tokio::main]).
+tokio = { version = "1", features = ["rt", "net", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Maintained successor to `dotenv`; used to parse .env files into maps.
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+tracing-appender = "0.2"
+thiserror = "2"
+anyhow = "1"
+
+[target.'cfg(windows)'.dependencies]
+# MessageBoxW for the crash dialog when there is no console.
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
