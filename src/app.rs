@@ -6,6 +6,7 @@
 //! [`UserEvent`] handled in [`App::user_event`]. The recording state machine
 //! ([`Machine`]) is pure and unit-tested independently of winit.
 
+use anyhow::Context;
 use winit::application::ApplicationHandler;
 use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -324,30 +325,39 @@ impl ApplicationHandler<UserEvent> for App {
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Bootstrap logging + panic hook, load config, build backends, wire the event
-/// loop, and run. Surfaces fatal startup errors to the user before returning.
+/// Bootstrap logging + panic hook, then run the app. Any startup failure is
+/// surfaced here — as a dialog AND a log line — while the `tracing-appender`
+/// log guard is still alive, so a failure is never a silent exit (R1).
+///
+/// Surfacing lives here, NOT in `main`: the `WorkerGuard` returned by
+/// `logging::init()` drops when `run()` returns, which flushes and stops the
+/// background log writer. Logging from `main` (after `run()` returns) would
+/// reach the dialog but be dropped from `xiuxiu.log` (KTD1).
 pub fn run() -> anyhow::Result<()> {
     let _log_guard = logging::init();
     logging::install_panic_hook();
     tracing::info!("xiuxiu starting");
 
-    let raw = match config::load() {
-        Ok(raw) => raw,
-        Err(e) => {
-            logging::show_error_dialog("Xiuxiu — configuration error", &e.to_string());
-            return Err(e.into());
-        }
-    };
+    let result = run_inner();
+    if let Err(e) = &result {
+        // Single surfacing point — the `{:#}` alternate form prints anyhow's
+        // full context chain (which step failed + the underlying OS error).
+        tracing::error!("startup failed: {e:#}");
+        logging::show_error_dialog("Xiuxiu — startup error", &format!("{e:#}"));
+    }
+    result
+}
 
-    let (backends, fallback_notice) = match Backends::initialize(&raw) {
-        Ok(result) => result,
-        Err(e) => {
-            logging::show_error_dialog("Xiuxiu — startup error", &e.to_string());
-            return Err(e.into());
-        }
-    };
+/// Performs the startup work, returning any failure via `?` with `.context()`
+/// so the single surfacing point in [`run`] can name the failing step (R2).
+fn run_inner() -> anyhow::Result<()> {
+    let raw = config::load().context("loading configuration")?;
+    let (backends, fallback_notice) =
+        Backends::initialize(&raw).context("initializing the transcription backend")?;
 
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .context("building the winit event loop")?;
     let proxy = event_loop.create_proxy();
 
     // Forward every external event source into the loop via the proxy so the
@@ -367,11 +377,17 @@ pub fn run() -> anyhow::Result<()> {
         }));
     }
 
-    // Hotkey manager must be created on the event-loop thread (Windows). Held by
-    // App for the program lifetime.
-    let hotkey_manager = GlobalHotKeyManager::new()?;
+    // Hotkey manager + registration must happen on the event-loop thread
+    // (Windows). The manager is held by App for the program lifetime. The
+    // registration context (R3) names the combo and its most likely failure
+    // cause, since Ctrl+Shift+Space is often already held by another app.
+    let hotkey_manager =
+        GlobalHotKeyManager::new().context("creating the global hotkey manager")?;
     let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
-    hotkey_manager.register(hotkey)?;
+    hotkey_manager.register(hotkey).context(
+        "registering the global hotkey Ctrl+Shift+Space — it may already be in use by \
+         another application (for example a Windows IME layout switch or PowerToys)",
+    )?;
     let hotkey_id = hotkey.id();
 
     // Audio thread: posts finalized capture back as a UserEvent (KTD12). The
@@ -383,7 +399,7 @@ pub fn run() -> anyhow::Result<()> {
 
     let mut pending_notices = Vec::new();
     if let Err(e) = init {
-        // R13: mic missing at launch.
+        // R13: mic missing at launch (non-fatal — surfaced as a tray notice).
         pending_notices.push(("Microphone unavailable".to_string(), e.to_string()));
     }
     if let Some(notice) = fallback_notice {
@@ -404,7 +420,9 @@ pub fn run() -> anyhow::Result<()> {
         pending_notices,
     };
 
-    event_loop.run_app(&mut app)?;
+    event_loop
+        .run_app(&mut app)
+        .context("running the winit event loop")?;
     tracing::info!("xiuxiu exiting");
     Ok(())
 }
